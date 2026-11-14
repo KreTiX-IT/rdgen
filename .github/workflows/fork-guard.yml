@@ -1,0 +1,23 @@
+name: Fork-Waechter
+
+# Prueft bei jedem Pull-Request und Push auf master, dass die Absicherungen
+# dieses Forks erhalten sind (siehe .github/scripts/fork_guard.py).
+
+on:
+  pull_request:
+  push:
+    branches:
+      - master
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Absicherungen pruefen
+        run: python3 .github/scripts/fork_guard.py --check
