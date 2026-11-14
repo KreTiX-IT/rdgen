@@ -290,14 +290,13 @@ jobs:
           sed -i -e 's|description = "RustDesk Remote Desktop"|description = "${{ env.appname }}"|' ./Cargo.toml
           sed -i -e 's|ProductName = "RustDesk"|ProductName = "${{ env.appname }}"|' ./Cargo.toml
           sed -i -e 's|FileDescription = "RustDesk Remote Desktop"|FileDescription = "${{ env.appname }}"|' ./Cargo.toml
-          sed -i -e 's|OriginalFilename = "rustdesk.exe"|OriginalFilename = "${{ env.slug_appname }}.exe"|' ./Cargo.toml
+          sed -i -e 's|OriginalFilename = "rustdesk.exe"|OriginalFilename = "${{ env.appname }}.exe"|' ./Cargo.toml
           sed -i -e 's|description = "RustDesk Remote Desktop"|description = "${{ env.appname }}"|' ./libs/portable/Cargo.toml
           sed -i -e 's|ProductName = "RustDesk"|ProductName = "${{ env.appname }}"|' ./libs/portable/Cargo.toml
           sed -i -e 's|FileDescription = "RustDesk Remote Desktop"|FileDescription = "${{ env.appname }}"|' ./libs/portable/Cargo.toml
-          sed -i -e 's|OriginalFilename = "rustdesk.exe"|OriginalFilename = "${{ env.slug_appname }}.exe"|' ./libs/portable/Cargo.toml
-          sed -i -e 's|const APP_PREFIX: \&str = "rustdesk";|const APP_PREFIX: \&str = "${{ env.slug_appname }}";|' ./libs/portable/src/main.rs
+          sed -i -e 's|OriginalFilename = "rustdesk.exe"|OriginalFilename = "${{ env.appname }}.exe"|' ./libs/portable/Cargo.toml
+          sed -i -e 's|const APP_PREFIX: \&str = "rustdesk";|const APP_PREFIX: \&str = "${{ env.appname }}";|' ./libs/portable/src/main.rs
           find ./src/lang -name "*.rs" -exec sed -i -e 's|RustDesk|${{ env.appname }}|' {} \;
-          sed -i -e '/-p tmpdeb\/usr\/lib\/rustdesk/d' ./build.py
 
       - name: change company name
         if: env.compname != 'Purslane Ltd'
@@ -374,10 +373,17 @@ jobs:
           command: |
             wget https://raw.githubusercontent.com/${{ github.repository }}/${{ github.sha }}/.github/patches/allowCustom.py
             python allowCustom.py
+            wget https://raw.githubusercontent.com/${{ github.repository }}/${{ github.sha }}/.github/patches/forcePresetPassword.py
+            python forcePresetPassword.py
             wget https://raw.githubusercontent.com/${{ github.repository }}/${{ github.sha }}/.github/patches/removeSetupServerTip.diff
             git apply removeSetupServerTip.diff
-            # sed -i '/intl:/a \ \ archive: ^3.6.1' ./flutter/pubspec.yaml
             echo -n '${{ env.custom }}' > ./custom_.txt
+
+      - name: apply theme colors
+        shell: bash
+        run: |
+          wget https://raw.githubusercontent.com/${{ github.repository }}/${{ github.sha }}/.github/patches/themeColors.py
+          python themeColors.py
           
       - name: change url to custom
         if: env.urlLink != 'https://rustdesk.com'
@@ -406,10 +412,14 @@ jobs:
         if: ${{ env.delayFix == 'true' }}
         shell: bash
         run: |
-          # Precise fix: only extend the direct-connection condition with the
-          # key check, instead of globally replacing !key.is_empty() with
-          # false (which would also disable TCP encryption and UDP logic).
-          sed -i -e 's#if is_local || peer_nat_type == NatType::SYMMETRIC {#if is_local || peer_nat_type == NatType::SYMMETRIC || !key.is_empty() {#' ./src/client.rs
+          # Skip the optional secure_tcp handshake to the rendezvous server.
+          # The open-source rustdesk-server never sends KeyExchange, so when an
+          # access_token is set (third-party API login) the client waits for
+          # READ_TIMEOUT and fails with:
+          # "Failed to secure tcp: deadline has elapsed: Please try later(0)".
+          # Matches DVForge's delay fix. Safe on 1.4.x-1.5.x/master: the only
+          # !key.is_empty() occurrences in client.rs are the two secure_tcp gates.
+          sed -i -e 's|!key.is_empty()|false|' ./src/client.rs
           grep -n "key.is_empty()" ./src/client.rs || true
 
       - name: use X for offline display instead of orange circle
@@ -421,8 +431,8 @@ jobs:
           retry_wait_seconds: 15
           shell: bash
           command: |
-            wget https://raw.githubusercontent.com/${{ github.repository }}/${{ github.sha }}/.github/patches/xoffline.diff
-            git apply xoffline.diff
+            wget https://raw.githubusercontent.com/${{ github.repository }}/${{ github.sha }}/.github/patches/xoffline.py
+            python xoffline.py
 
       - name: hide-cm
         if: false # hidecm (unsichtbare Sitzungen) in diesem Fork deaktiviert
@@ -441,7 +451,7 @@ jobs:
         if: env.removeNewVersionNotif == 'true'
         run: | 
           sed -i -e 's|updateUrl.isNotEmpty|false|' ./flutter/lib/desktop/pages/desktop_home_page.dart
-          sed -i '/let (request, url) =/,/Ok(())/{/Ok(())/!d}' ./src/common.rs
+          #sed -i '/let (request, url) =/,/Ok(())/{/Ok(())/!d}' ./src/common.rs
 
       - name: Restore bridge files
         if: matrix.job.arch == 'x86_64' || env.UPLOAD_ARTIFACT == 'true'
@@ -535,7 +545,7 @@ jobs:
             echo $JOBS
 
             # Make the right unit stop when the services is stopped by tray
-            sed -ie "s|\(systemctl\s\+\S\+\s\){app_name}|\1${{ env.slug_appname }}|g" src/platform/linux.rs
+            sed -ie "s|\(systemctl\s\+\S\+\s\){app_name}|\1${{ env.appname }}|g" src/platform/linux.rs
             sed -ie 's|\({home}/{p}/{app_name0}2\?.toml\)|\\"\1\\"|g' src/platform/linux.rs
             sed -ie 's|\(/root/{p}/\)|\\"\1\\"|g' src/platform/linux.rs
 
@@ -600,6 +610,14 @@ jobs:
             export DEB_ARCH=${{ matrix.job.deb_arch }}
             mkdir -p flutter/tmpdeb/usr/share/rustdesk
             cp ./custom_.txt ./flutter/tmpdeb/usr/share/rustdesk/custom_.txt
+            # With a custom app name the launcher and bundle live in
+            # /usr/share/<appname>/, not /usr/share/rustdesk/. RustDesk reads
+            # custom_.txt from the executable's directory, so stage a copy
+            # there as well or every custom setting is ignored.
+            if [ "${{ env.appname }}" != "rustdesk" ]; then
+              mkdir -p "flutter/tmpdeb/usr/share/${{ env.appname }}"
+              cp ./custom_.txt "flutter/tmpdeb/usr/share/${{ env.appname }}/custom_.txt"
+            fi
             if [[ "${{ env.logolink_url }}" != "false" ]]; then
               wget -O ./flutter/assets/logo.png ${{ env.logolink_url }}/get_png?filename=${{ env.logolink_file }}"&"uuid=${{ env.logolink_uuid }}
             fi
@@ -620,9 +638,9 @@ jobs:
             # Only run the whitelabeling steps if the custom app name is actually different
             if [ "${{ env.appname }}" != "rustdesk" ]; then
                 # Change files names in the output .deb
-                sed -ie "s|\(cp .* \)tmpdeb/usr/share/rustdesk/files/systemd/|\1tmpdeb/usr/share/rustdesk/files/systemd/${{ env.slug_appname }}.service|g" build.py
-                sed -ie "s|cp -r \(.\+\)\* \([^ ]\+\)/rustdesk|mv \1rustdesk \1${{ env.slug_appname }}; cp -r \1\* \2/${{ env.slug_appname }}|g" build.py
-                sed -ie "s|\(tmpdeb/[^ ]*\)rustdesk|\1${{ env.slug_appname }}|g" build.py
+                sed -ie "s|\(cp .* \)tmpdeb/usr/share/rustdesk/files/systemd/|\1tmpdeb/usr/share/rustdesk/files/systemd/${{ env.appname }}.service|g" build.py
+                sed -ie "s|cp -r \(.\+\)\* \([^ ]\+\)/rustdesk|mv \1rustdesk \1${{ env.appname }}; cp -r \1\* \2/${{ env.appname }}|g" build.py
+                sed -ie "s|\(tmpdeb/[^ ]*\)rustdesk|\1${{ env.appname }}|g" build.py
                 # The rename above is greedy in \1, so it rewrites only the LAST
                 # "rustdesk" of each path and leaves build.py's globs pointing where the
                 # staging tree never exists. Three corrections, all confined to the drm
@@ -631,41 +649,57 @@ jobs:
                 #
                 # 1. Directory component: the cp -r rename above stages into
                 #    tmpdeb/usr/share/<appname>/, but the globs kept usr/share/rustdesk/.
-                sed -ie "s|tmpdeb/usr/share/rustdesk/|tmpdeb/usr/share/${{ env.slug_appname }}/|g" build.py
+                sed -ie "s|tmpdeb/usr/share/rustdesk/|tmpdeb/usr/share/${{ env.appname }}/|g" build.py
                 # 2. Library filename: build.py renames only the executable and copies the
                 #    bundle verbatim, so the cdylib stays librustdesk.so. The greedy sed
                 #    renamed it to lib<appname>.so, and that is the file carrying the drm
                 #    marker -- the thin Flutter launcher does not.
-                sed -ie "s|lib/lib${{ env.slug_appname }}\.so|lib/librustdesk.so|g" build.py
+                sed -ie "s|lib/lib${{ env.appname }}\.so|lib/librustdesk.so|g" build.py
                 # 3. libdrmtap must NOT be renamed: drmtap_dl.rs dlopens the absolute path
                 #    /usr/lib/rustdesk/libdrmtap.so.0, compiled into the binary and
                 #    rewritten by nothing here. Staging it under /usr/lib/<appname>/
                 #    packages and installs cleanly, then never loads on the user's machine.
-                sed -ie "s|tmpdeb/usr/lib/${{ env.slug_appname }}|tmpdeb/usr/lib/rustdesk|g" build.py
-                sed -ie "s|Package: rustdesk|Package: ${{ env.slug_appname }}|g" build.py
+                sed -ie "s|tmpdeb/usr/lib/${{ env.appname }}|tmpdeb/usr/lib/rustdesk|g" build.py
+                sed -ie "s|Package: rustdesk|Package: ${{ env.appname }}|g" build.py
                 sed -ie "s|RustDesk|${{ env.appname }}|g" res/rustdesk.desktop
                 FILES=$(sed -ne "s~.*cp\s\(../\)\?\+\(.\+\.\(desktop\|service\)\)\s\+tmpdeb/.*~\2~p" build.py | sort | uniq)
                 FILES=$(echo -e "$FILES\n$(ls --color=never res/DEBIAN/*)")
                 for FILE in $(echo $FILES | sed "s/\n/ /g"); do
-                  sed -ie "s|rustdesk|${{ env.slug_appname }}|g" $FILE
+                  sed -ie "s|rustdesk|${{ env.appname }}|g" $FILE
                 done
                 for file in "./res/rpm-flutter.spec" "./res/rpm-flutter-suse.spec"; do
                   sed -ie "s|^\(URL:\s*\).*|\1${{ env.downloadLink }}|g" "$file"
                   sed -ie "s|^\(Vendor:\s*\).*|\1${{ env.compname }}|g" "$file"
-                  sed -ie '/\${\?HBB}\?/!{/\(^Name:\|\/usr\|\/etc\|systemctl\)/s|rustdesk|${{ env.slug_appname }}|g}' "$file"
-                  sed -ie '/\${\?HBB}\?/{/^install/s|\(\/usr\/.*\/\)rustdesk|\1${{ env.slug_appname }}|g}' "$file"
-                  sed -ie '/\${\?HBB}\?/{/^mkdir/s|rustdesk|${{ env.slug_appname }}|g}' "$file"
+                  sed -ie '/\${\?HBB}\?/!{/\(^Name:\|\/usr\|\/etc\|systemctl\)/s|rustdesk|${{ env.appname }}|g}' "$file"
+                  sed -ie '/\${\?HBB}\?/{/^install/s|\(\/usr\/.*\/\)rustdesk|\1${{ env.appname }}|g}' "$file"
+                  sed -ie '/\${\?HBB}\?/{/^mkdir/s|rustdesk|${{ env.appname }}|g}' "$file"
                   for extension in ".desktop" "-link.desktop" ".service"; do
-                    sed -ie "/^%files$/i\mv %{buildroot}/usr/share/${{ env.slug_appname }}/files/rustdesk$extension %{buildroot}/usr/share/${{ env.slug_appname }}/files/${{ env.slug_appname }}$extension" "$file"
-                    sed -ie "/^%files$/i\sed -ie 's|RustDesk|${{ env.slug_appname }}|g' %{buildroot}/usr/share/${{ env.slug_appname }}/files/${{ env.slug_appname }}$extension" "$file"
-                    sed -ie "/^%files$/i\sed -ie 's|rustdesk|${{ env.slug_appname }}|g' %{buildroot}/usr/share/${{ env.slug_appname }}/files/${{ env.slug_appname }}$extension" "$file"
+                    sed -ie "/^%files$/i\mv %{buildroot}/usr/share/${{ env.appname }}/files/rustdesk$extension %{buildroot}/usr/share/${{ env.appname }}/files/${{ env.appname }}$extension" "$file"
+                    sed -ie "/^%files$/i\sed -ie 's|RustDesk|${{ env.appname }}|g' %{buildroot}/usr/share/${{ env.appname }}/files/${{ env.appname }}$extension" "$file"
+                    sed -ie "/^%files$/i\sed -ie 's|rustdesk|${{ env.appname }}|g' %{buildroot}/usr/share/${{ env.appname }}/files/${{ env.appname }}$extension" "$file"
                   done
                   sed -ie '/^%files$/i\\n' "$file"
                 done
             fi
 
             python3 ./build.py --flutter --skip-cargo
+            # Fail loudly if the custom config is not next to the executable.
+            # RustDesk only reads custom_.txt from current_exe().parent(), and a
+            # missing file silently disables every baked setting.
+            if [ "${{ env.appname }}" = "rustdesk" ]; then
+              expected_dir="usr/share/rustdesk"
+            else
+              expected_dir="usr/share/${{ env.appname }}"
+            fi
             for name in *.deb; do
+              dpkg-deb -c "$name" | grep -q "$expected_dir/custom_.txt" || {
+                echo "::error::$name does not contain $expected_dir/custom_.txt"
+                exit 1
+              }
+              dpkg-deb -c "$name" | grep -q "$expected_dir/${{ env.appname }}" || {
+                echo "::error::$name does not contain $expected_dir/${{ env.appname }}"
+                exit 1
+              }
               mv "$name" /workspace/output/"${{ env.filename }}-${{ matrix.job.arch }}.deb"
             done
 
@@ -674,8 +708,12 @@ jobs:
             # baked password/permissions land in every format.
             BUNDLE=flutter/build/linux/x64/release/bundle
             [ "${{ matrix.job.arch }}" = "aarch64" ] && BUNDLE=flutter/build/linux/arm64/release/bundle
-            cp ./custom_.txt "$BUNDLE/custom_.txt" || echo "WARN: could not copy custom_.txt into bundle"
-            ls -l "$BUNDLE/custom_.txt" || echo "WARN: custom_.txt missing from bundle ($BUNDLE)"
+            cp ./custom_.txt "$BUNDLE/custom_.txt"
+            test -f "$BUNDLE/custom_.txt" || {
+              echo "::error::custom_.txt missing from bundle ($BUNDLE); RPM/Arch clients would ignore every custom setting"
+              exit 1
+            }
+            ls -l "$BUNDLE/custom_.txt"
 
             # rpm package
             echo -e "start packaging fedora package"
@@ -715,6 +753,14 @@ jobs:
           sed -i "s/x86_64/${{ matrix.job.arch }}/g" res/PKGBUILD
           if [[ "${{ matrix.job.arch }}" == "aarch64" ]]; then
             sed -i "s/x86_64/aarch64/g" ./res/PKGBUILD
+          fi
+          if [ "${{ env.appname }}" != "rustdesk" ]; then
+            # PKGBUILD installs the bundle under /usr/share/rustdesk and links
+            # /usr/bin/rustdesk; build.py renamed the executable to the custom
+            # app name, so move the install dir and both sides of the symlink.
+            sed -i "s|/usr/share/rustdesk/rustdesk|/usr/share/${{ env.appname }}/${{ env.appname }}|g" res/PKGBUILD
+            sed -i "s|/usr/share/rustdesk|/usr/share/${{ env.appname }}|g" res/PKGBUILD res/pacman_install
+            sed -i "s|usr/bin/rustdesk|usr/bin/${{ env.appname }}|g" res/PKGBUILD
           fi
 
       - name: Build archlinux package
@@ -974,14 +1020,13 @@ jobs:
           sed -i -e 's|description = "RustDesk Remote Desktop"|description = "${{ env.appname }}"|' ./Cargo.toml
           sed -i -e 's|ProductName = "RustDesk"|ProductName = "${{ env.appname }}"|' ./Cargo.toml
           sed -i -e 's|FileDescription = "RustDesk Remote Desktop"|FileDescription = "${{ env.appname }}"|' ./Cargo.toml
-          sed -i -e 's|OriginalFilename = "rustdesk.exe"|OriginalFilename = "${{ env.slug_appname }}.exe"|' ./Cargo.toml
+          sed -i -e 's|OriginalFilename = "rustdesk.exe"|OriginalFilename = "${{ env.appname }}.exe"|' ./Cargo.toml
           sed -i -e 's|description = "RustDesk Remote Desktop"|description = "${{ env.appname }}"|' ./libs/portable/Cargo.toml
           sed -i -e 's|ProductName = "RustDesk"|ProductName = "${{ env.appname }}"|' ./libs/portable/Cargo.toml
           sed -i -e 's|FileDescription = "RustDesk Remote Desktop"|FileDescription = "${{ env.appname }}"|' ./libs/portable/Cargo.toml
-          sed -i -e 's|OriginalFilename = "rustdesk.exe"|OriginalFilename = "${{ env.slug_appname }}.exe"|' ./libs/portable/Cargo.toml
-          sed -i -e 's|const APP_PREFIX: \&str = "rustdesk";|const APP_PREFIX: \&str = "${{ env.slug_appname }}";|' ./libs/portable/src/main.rs
+          sed -i -e 's|OriginalFilename = "rustdesk.exe"|OriginalFilename = "${{ env.appname }}.exe"|' ./libs/portable/Cargo.toml
+          sed -i -e 's|const APP_PREFIX: \&str = "rustdesk";|const APP_PREFIX: \&str = "${{ env.appname }}";|' ./libs/portable/src/main.rs
           find ./src/lang -name "*.rs" -exec sed -i -e 's|RustDesk|${{ env.appname }}|' {} \;
-          sed -i -e '/-p tmpdeb\/usr\/lib\/rustdesk/d' ./build.py
 
       - name: change company name
         if: env.compname != 'Purslane Ltd'
@@ -1058,9 +1103,17 @@ jobs:
           command: |
             wget https://raw.githubusercontent.com/${{ github.repository }}/${{ github.sha }}/.github/patches/allowCustom.py
             python allowCustom.py
+            wget https://raw.githubusercontent.com/${{ github.repository }}/${{ github.sha }}/.github/patches/forcePresetPassword.py
+            python forcePresetPassword.py
             wget https://raw.githubusercontent.com/${{ github.repository }}/${{ github.sha }}/.github/patches/removeSetupServerTip.diff
             git apply removeSetupServerTip.diff
             echo -n '${{ env.custom }}' > ./custom_.txt
+
+      - name: apply theme colors
+        shell: bash
+        run: |
+          wget https://raw.githubusercontent.com/${{ github.repository }}/${{ github.sha }}/.github/patches/themeColors.py
+          python themeColors.py
           
       - name: change url to custom
         if: env.urlLink != 'https://rustdesk.com'
@@ -1089,10 +1142,14 @@ jobs:
         if: ${{ env.delayFix == 'true' }}
         shell: bash
         run: |
-          # Precise fix: only extend the direct-connection condition with the
-          # key check, instead of globally replacing !key.is_empty() with
-          # false (which would also disable TCP encryption and UDP logic).
-          sed -i -e 's#if is_local || peer_nat_type == NatType::SYMMETRIC {#if is_local || peer_nat_type == NatType::SYMMETRIC || !key.is_empty() {#' ./src/client.rs
+          # Skip the optional secure_tcp handshake to the rendezvous server.
+          # The open-source rustdesk-server never sends KeyExchange, so when an
+          # access_token is set (third-party API login) the client waits for
+          # READ_TIMEOUT and fails with:
+          # "Failed to secure tcp: deadline has elapsed: Please try later(0)".
+          # Matches DVForge's delay fix. Safe on 1.4.x-1.5.x/master: the only
+          # !key.is_empty() occurrences in client.rs are the two secure_tcp gates.
+          sed -i -e 's|!key.is_empty()|false|' ./src/client.rs
           grep -n "key.is_empty()" ./src/client.rs || true
 
       - name: use X for offline display instead of orange circle
@@ -1104,8 +1161,8 @@ jobs:
           retry_wait_seconds: 15
           shell: bash
           command: |
-            wget https://raw.githubusercontent.com/${{ github.repository }}/${{ github.sha }}/.github/patches/xoffline.diff
-            git apply xoffline.diff
+            wget https://raw.githubusercontent.com/${{ github.repository }}/${{ github.sha }}/.github/patches/xoffline.py
+            python xoffline.py
 
       - name: hide-cm
         if: false # hidecm (unsichtbare Sitzungen) in diesem Fork deaktiviert
@@ -1124,7 +1181,7 @@ jobs:
         if: env.removeNewVersionNotif == 'true'
         run: | 
           sed -i -e 's|updateUrl.isNotEmpty|false|' ./flutter/lib/desktop/pages/desktop_home_page.dart
-          sed -i '/let (request, url) =/,/Ok(())/{/Ok(())/!d}' ./src/common.rs
+          #sed -i '/let (request, url) =/,/Ok(())/{/Ok(())/!d}' ./src/common.rs
 
       - name: Restore bridge files
         uses: actions/download-artifact@master
@@ -1214,7 +1271,7 @@ jobs:
               esac
             done
 
-            sed -ie "s|\(systemctl\s\+\S\+\s\){app_name}|\1${{ env.slug_appname }}|g" src/platform/linux.rs
+            sed -ie "s|\(systemctl\s\+\S\+\s\){app_name}|\1${{ env.appname }}|g" src/platform/linux.rs
             sed -ie 's|\({home}/{p}/{app_name0}2\?.toml\)|\\"\1\\"|g' src/platform/linux.rs
             sed -ie 's|\(/root/{p}/\)|\\"\1\\"|g' src/platform/linux.rs
 
@@ -1244,6 +1301,14 @@ jobs:
             export DEB_ARCH=amd64
             mkdir -p flutter/tmpdeb/usr/share/rustdesk
             cp ./custom_.txt ./flutter/tmpdeb/usr/share/rustdesk/custom_.txt
+            # With a custom app name the launcher and bundle live in
+            # /usr/share/<appname>/, not /usr/share/rustdesk/. RustDesk reads
+            # custom_.txt from the executable's directory, so stage a copy
+            # there as well or every custom setting is ignored.
+            if [ "${{ env.appname }}" != "rustdesk" ]; then
+              mkdir -p "flutter/tmpdeb/usr/share/${{ env.appname }}"
+              cp ./custom_.txt "flutter/tmpdeb/usr/share/${{ env.appname }}/custom_.txt"
+            fi
             if [[ "${{ env.logolink_url }}" != "false" ]]; then
               wget -O ./flutter/assets/logo.png ${{ env.logolink_url }}/get_png?filename=${{ env.logolink_file }}"&"uuid=${{ env.logolink_uuid }}
             fi
@@ -1259,9 +1324,9 @@ jobs:
             fi
 
             if [ "${{ env.appname }}" != "rustdesk" ]; then
-                sed -ie "s|\(cp .* \)tmpdeb/usr/share/rustdesk/files/systemd/|\1tmpdeb/usr/share/rustdesk/files/systemd/${{ env.slug_appname }}.service|g" build.py
-                sed -ie "s|cp -r \(.\+\)\* \([^ ]\+\)/rustdesk|mv \1rustdesk \1${{ env.slug_appname }}; cp -r \1\* \2/${{ env.slug_appname }}|g" build.py
-                sed -ie "s|\(tmpdeb/[^ ]*\)rustdesk|\1${{ env.slug_appname }}|g" build.py
+                sed -ie "s|\(cp .* \)tmpdeb/usr/share/rustdesk/files/systemd/|\1tmpdeb/usr/share/rustdesk/files/systemd/${{ env.appname }}.service|g" build.py
+                sed -ie "s|cp -r \(.\+\)\* \([^ ]\+\)/rustdesk|mv \1rustdesk \1${{ env.appname }}; cp -r \1\* \2/${{ env.appname }}|g" build.py
+                sed -ie "s|\(tmpdeb/[^ ]*\)rustdesk|\1${{ env.appname }}|g" build.py
                 # The rename above is greedy in \1, so it rewrites only the LAST
                 # "rustdesk" of each path and leaves build.py's globs pointing where the
                 # staging tree never exists. Three corrections, all confined to the drm
@@ -1270,28 +1335,54 @@ jobs:
                 #
                 # 1. Directory component: the cp -r rename above stages into
                 #    tmpdeb/usr/share/<appname>/, but the globs kept usr/share/rustdesk/.
-                sed -ie "s|tmpdeb/usr/share/rustdesk/|tmpdeb/usr/share/${{ env.slug_appname }}/|g" build.py
+                sed -ie "s|tmpdeb/usr/share/rustdesk/|tmpdeb/usr/share/${{ env.appname }}/|g" build.py
                 # 2. Library filename: build.py renames only the executable and copies the
                 #    bundle verbatim, so the cdylib stays librustdesk.so. The greedy sed
                 #    renamed it to lib<appname>.so, and that is the file carrying the drm
                 #    marker -- the thin Flutter launcher does not.
-                sed -ie "s|lib/lib${{ env.slug_appname }}\.so|lib/librustdesk.so|g" build.py
+                sed -ie "s|lib/lib${{ env.appname }}\.so|lib/librustdesk.so|g" build.py
                 # 3. libdrmtap must NOT be renamed: drmtap_dl.rs dlopens the absolute path
                 #    /usr/lib/rustdesk/libdrmtap.so.0, compiled into the binary and
                 #    rewritten by nothing here. Staging it under /usr/lib/<appname>/
                 #    packages and installs cleanly, then never loads on the user's machine.
-                sed -ie "s|tmpdeb/usr/lib/${{ env.slug_appname }}|tmpdeb/usr/lib/rustdesk|g" build.py
-                sed -ie "s|Package: rustdesk|Package: ${{ env.slug_appname }}|g" build.py
+                sed -ie "s|tmpdeb/usr/lib/${{ env.appname }}|tmpdeb/usr/lib/rustdesk|g" build.py
+                sed -ie "s|Package: rustdesk|Package: ${{ env.appname }}|g" build.py
                 sed -ie "s|RustDesk|${{ env.appname }}|g" res/rustdesk.desktop
                 FILES=$(sed -ne "s~.*cp\s\(../\)\?\+\(.\+\.\(desktop\|service\)\)\s\+tmpdeb/.*~\2~p" build.py | sort | uniq)
                 FILES=$(echo -e "$FILES\n$(ls --color=never res/DEBIAN/*)")
                 for FILE in $(echo $FILES | sed "s/\n/ /g"); do
-                  sed -ie "s|rustdesk|${{ env.slug_appname }}|g" $FILE
+                  sed -ie "s|rustdesk|${{ env.appname }}|g" $FILE
+                done
+                for file in "./res/rpm-flutter.spec" "./res/rpm-flutter-suse.spec"; do
+                  sed -ie "s|^\(URL:\s*\).*|\1${{ env.downloadLink }}|g" "$file"
+                  sed -ie "s|^\(Vendor:\s*\).*|\1${{ env.compname }}|g" "$file"
+                  sed -ie '/\${\?HBB}\?/!{/\(^Name:\|\/usr\|\/etc\|systemctl\)/s|rustdesk|${{ env.appname }}|g}' "$file"
+                  sed -ie '/\${\?HBB}\?/{/^install/s|\(\/usr\/.*\/\)rustdesk|\1${{ env.appname }}|g}' "$file"
+                  sed -ie '/\${\?HBB}\?/{/^mkdir/s|rustdesk|${{ env.appname }}|g}' "$file"
+                  for extension in ".desktop" "-link.desktop" ".service"; do
+                    sed -ie "/^%files$/i\mv %{buildroot}/usr/share/${{ env.appname }}/files/rustdesk$extension %{buildroot}/usr/share/${{ env.appname }}/files/${{ env.appname }}$extension" "$file"
+                    sed -ie "/^%files$/i\sed -ie 's|RustDesk|${{ env.appname }}|g' %{buildroot}/usr/share/${{ env.appname }}/files/${{ env.appname }}$extension" "$file"
+                    sed -ie "/^%files$/i\sed -ie 's|rustdesk|${{ env.appname }}|g' %{buildroot}/usr/share/${{ env.appname }}/files/${{ env.appname }}$extension" "$file"
+                  done
+                  sed -ie '/^%files$/i\\n' "$file"
                 done
             fi
 
             python3 ./build.py --flutter --drm --hwcodec --unix-file-copy-paste --skip-cargo
+            if [ "${{ env.appname }}" = "rustdesk" ]; then
+              expected_dir="usr/share/rustdesk"
+            else
+              expected_dir="usr/share/${{ env.appname }}"
+            fi
             for name in *.deb; do
+              dpkg-deb -c "$name" | grep -q "$expected_dir/custom_.txt" || {
+                echo "::error::$name does not contain $expected_dir/custom_.txt"
+                exit 1
+              }
+              dpkg-deb -c "$name" | grep -q "$expected_dir/${{ env.appname }}" || {
+                echo "::error::$name does not contain $expected_dir/${{ env.appname }}"
+                exit 1
+              }
               mv "$name" /workspace/output/"${{ env.filename }}-unattended-wayland-x86_64.deb"
             done
 
@@ -1439,8 +1530,8 @@ jobs:
             # because `appimage/*` globs it too, and sed over an ar archive rewrites
             # bytes inside it.
             mv appimage/rustdesk.deb "${RUNNER_TEMP}/appimage-payload.deb"
-            sed -ie "s|rustdesk|${{ env.slug_appname }}|g" appimage/*
-            mv "${RUNNER_TEMP}/appimage-payload.deb" "appimage/${{ env.slug_appname }}.deb"
+            sed -ie "s|rustdesk|${{ env.appname }}|g" appimage/*
+            mv "${RUNNER_TEMP}/appimage-payload.deb" "appimage/${{ env.appname }}.deb"
           fi
           sudo apt-get update -y
           sudo apt-get install -y libarchive-tools libfuse2
@@ -1598,14 +1689,26 @@ jobs:
               mv flatpak/rustdesk.deb /tmp/flatpak-payload.deb
               sed -ie "s|rustdesk|@@RDGEN_FLAT_0@@|g" flatpak/*
               sed -ie "s|RustDesk|@@RDGEN_FLAT_1@@|g" flatpak/*
-              sed -ie "s|@@RDGEN_FLAT_0@@|${{ env.slug_appname }}|g" flatpak/*
-              sed -ie "s|@@RDGEN_FLAT_1@@|${{ env.slug_appname }}|g" flatpak/*
-              mv /tmp/flatpak-payload.deb "flatpak/${{ env.slug_appname }}.deb"
+              sed -ie "s|@@RDGEN_FLAT_0@@|${{ env.appname }}|g" flatpak/*
+              sed -ie "s|@@RDGEN_FLAT_1@@|${{ env.appname }}|g" flatpak/*
+              mv /tmp/flatpak-payload.deb "flatpak/${{ env.appname }}.deb"
               # The manifest's other source is the metainfo file. Those same seds rewrote
               # the REFERENCE to it without renaming the file on disk, so only the name
               # is left to fix; its contents are already rewritten.
-              FLAT="$(echo "${{ env.slug_appname }}" | tr -d ' ')"
-              BUNDLE_ID="com.${FLAT}.${FLAT}"
+              # Flatpak app IDs are reverse-DNS names: every dot-separated
+              # segment may only use [A-Za-z0-9_] and must not start with a
+              # digit, and only the final segment may contain '-'. appname is a
+              # free-form display name (for example "My-Company"), so derive the
+              # ID from a sanitised copy instead of letting flatpak-builder
+              # reject "com.My-Company.My-Company" with "Only last name segment
+              # can contain -". Anything that still sanitises to nothing (all
+              # digits/symbols) falls back to "app".
+              FLAT="$(printf '%s' "${{ env.appname }}" | tr -d ' ' | sed -E 's/[^A-Za-z0-9_-]+/_/g; s/^[^A-Za-z]+//; s/-+$//')"
+              if [ -z "$FLAT" ]; then
+                FLAT="app"
+              fi
+              FLAT_VENDOR="${FLAT//-/_}"
+              BUNDLE_ID="com.${FLAT_VENDOR}.${FLAT}"
               sed -ie "s|\"id\": \"com[^\"]*\"|\"id\": \"${BUNDLE_ID}\"|" flatpak/rustdesk.json
               sed -ie "s|\"path\": \"com[^\"]*\.metainfo\.xml\"|\"path\": \"${BUNDLE_ID}.metainfo.xml\"|" flatpak/rustdesk.json
               sed -ie "s|<id>com[^<]*</id>|<id>${BUNDLE_ID}</id>|" flatpak/*.metainfo.xml
