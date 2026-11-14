@@ -134,3 +134,77 @@ class GeneratorViewTests(TestCase):
             secrets = json.loads(zf.read('secrets.json'))
         custom = json.loads(base64.b64decode(secrets['custom']))
         self.assertEqual(custom['override-settings']['hide-powered-by-me'], 'Y')
+
+
+class VersionNoticeTests(SimpleTestCase):
+    """Hinweis auf neue RustDesk-Versionen (version_check.py)."""
+
+    def setUp(self):
+        from django.core.cache import cache
+        from . import version_check
+        self.vc = version_check
+        cache.delete(version_check.CACHE_KEY)
+        self.addCleanup(cache.delete, version_check.CACHE_KEY)
+
+    def _responses(self, latest_tag, upstream_forms='', fail=False):
+        import requests
+
+        def fake_get(url, headers=None, timeout=None):
+            if fail:
+                raise requests.ConnectionError('offline')
+            resp = mock.Mock()
+            resp.status_code = 200
+            resp.raise_for_status = mock.Mock()
+            if url == self.vc.RUSTDESK_LATEST_URL:
+                resp.json = mock.Mock(return_value={'tag_name': latest_tag})
+            else:
+                resp.text = upstream_forms
+            return resp
+        return mock.patch.object(self.vc.requests, 'get', side_effect=fake_get)
+
+    def _max_offered(self):
+        versions = [self.vc._parse(v) for v in self.vc._offered_versions()]
+        return max(versions)
+
+    def test_no_notice_when_latest_is_offered(self):
+        latest = '.'.join(str(x) for x in self._max_offered())
+        with self._responses(latest):
+            self.assertIsNone(self.vc.get_version_notice())
+
+    def test_notice_when_upstream_supports_newer_version(self):
+        major, minor, patch = self._max_offered()
+        newer = f'{major}.{minor}.{patch + 1}'
+        with self._responses(newer, upstream_forms=f"('{newer}','{newer}')"):
+            notice = self.vc.get_version_notice()
+        self.assertEqual(notice['latest'], newer)
+        self.assertTrue(notice['upstream_supported'])
+
+    def test_info_notice_when_upstream_does_not_support_yet(self):
+        major, minor, patch = self._max_offered()
+        newer = f'{major}.{minor + 1}.0'
+        with self._responses(newer, upstream_forms="('1.0.0','1.0.0')"):
+            notice = self.vc.get_version_notice()
+        self.assertEqual(notice['latest'], newer)
+        self.assertFalse(notice['upstream_supported'])
+
+    def test_github_unreachable_shows_nothing_and_is_cached(self):
+        with self._responses('', fail=True) as fake:
+            self.assertIsNone(self.vc.get_version_notice())
+            self.assertIsNone(self.vc.get_version_notice())
+        self.assertEqual(fake.call_count, 1)
+
+    def test_result_is_cached(self):
+        major, minor, patch = self._max_offered()
+        newer = f'{major}.{minor}.{patch + 1}'
+        with self._responses(newer, upstream_forms='') as fake:
+            self.vc.get_version_notice()
+            self.vc.get_version_notice()
+        self.assertEqual(fake.call_count, 2)  # Release + Original-forms.py, danach aus dem Cache
+
+    def test_banner_rendered_on_generator_page(self):
+        notice = {'latest': '9.9.9', 'release_url': 'https://example.invalid/r',
+                  'upstream_supported': True, 'upstream_url': 'https://example.invalid/u'}
+        with mock.patch('rdgenerator.views.get_version_notice', return_value=notice):
+            response = self.client.get('/')
+        self.assertContains(response, 'RustDesk 9.9.9 ist verfügbar')
+        self.assertContains(response, 'version-notice--action')
