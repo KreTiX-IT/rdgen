@@ -1,0 +1,211 @@
+name: Abgleich mit Original-rdgen
+
+# Prueft taeglich, ob bryangerlach/rdgen neue Commits hat, und oeffnet dann
+# einen Pull-Request in diesem Fork. Gemergt wird nie automatisch.
+#
+# - Laesst sich der Abgleich ohne Konflikte mergen, wird der Merge-Commit
+#   vorbereitet, neue Patch-URLs werden per fork_guard.py auf dieses Repo
+#   (github.sha) umgeschrieben und die Absicherungen geprueft.
+# - Gibt es Konflikte, wird der Stand des Originals als Branch hochgeladen und
+#   der PR weist darauf hin, dass die Konflikte von Hand aufzuloesen sind.
+#
+# Zusaetzlich wird ein Issue eroeffnet, wenn RustDesk eine neue Version
+# veroeffentlicht hat, die rdgen noch nicht anbietet.
+#
+# Benoetigt das Repository-Secret SYNC_TOKEN: ein Fine-grained Personal Access
+# Token nur fuer KreTiX-IT/rdgen mit den Rechten Contents, Pull requests,
+# Issues (jeweils Read and write) und Workflows (Read and write). Das
+# Standard-GITHUB_TOKEN darf keine Aenderungen an .github/workflows pushen,
+# und die Commits des Originals aendern fast immer Workflows.
+
+on:
+  schedule:
+    - cron: '17 5 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: upstream-sync
+  cancel-in-progress: false
+
+env:
+  UPSTREAM_REPO: bryangerlach/rdgen
+  UPSTREAM_BRANCH: master
+  BASE_BRANCH: master
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: SYNC_TOKEN pruefen
+        env:
+          SYNC_TOKEN: ${{ secrets.SYNC_TOKEN }}
+        run: |
+          if [ -z "$SYNC_TOKEN" ]; then
+            echo "::error::Secret SYNC_TOKEN fehlt (siehe Kommentar oben in upstream-sync.yml)."
+            exit 1
+          fi
+
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.BASE_BRANCH }}
+          fetch-depth: 0
+          token: ${{ secrets.SYNC_TOKEN }}
+
+      - name: Original-Repo abrufen
+        id: upstream
+        run: |
+          git config user.name "rdgen-sync[bot]"
+          git config user.email "rdgen-sync@users.noreply.github.com"
+          git remote add upstream "https://github.com/${UPSTREAM_REPO}.git"
+          git fetch --no-tags upstream "${UPSTREAM_BRANCH}"
+          UP_SHA=$(git rev-parse "upstream/${UPSTREAM_BRANCH}")
+          echo "sha=${UP_SHA}" >> "$GITHUB_OUTPUT"
+          echo "short=${UP_SHA:0:7}" >> "$GITHUB_OUTPUT"
+          if git merge-base --is-ancestor "${UP_SHA}" HEAD; then
+            echo "Keine neuen Commits im Original."
+            echo "new=false" >> "$GITHUB_OUTPUT"
+          else
+            COUNT=$(git rev-list --count "HEAD..${UP_SHA}")
+            echo "${COUNT} neue Commits im Original."
+            echo "new=true" >> "$GITHUB_OUTPUT"
+            echo "count=${COUNT}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Offenen Abgleich-PR suchen
+        id: existing
+        if: steps.upstream.outputs.new == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.SYNC_TOKEN }}
+        run: |
+          BRANCH="upstream-sync/${{ steps.upstream.outputs.short }}"
+          echo "branch=${BRANCH}" >> "$GITHUB_OUTPUT"
+          OPEN=$(gh pr list --repo "${GITHUB_REPOSITORY}" --head "${BRANCH}" --state open --json number --jq 'length')
+          if [ "${OPEN}" != "0" ]; then
+            echo "Fuer diesen Stand ist bereits ein PR offen."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Mergen und Absicherungen pruefen
+        id: merge
+        if: steps.upstream.outputs.new == 'true' && steps.existing.outputs.skip == 'false'
+        run: |
+          BRANCH="${{ steps.existing.outputs.branch }}"
+          UP_SHA="${{ steps.upstream.outputs.sha }}"
+          git checkout -b "${BRANCH}"
+          if git merge --no-ff --no-edit -m "Abgleich mit ${UPSTREAM_REPO} (${UP_SHA:0:7})" "${UP_SHA}"; then
+            echo "conflicts=false" >> "$GITHUB_OUTPUT"
+            set +e
+            python3 .github/scripts/fork_guard.py --fix > /tmp/guard.txt 2>&1
+            GUARD_RC=$?
+            set -e
+            cat /tmp/guard.txt
+            if ! git diff --quiet; then
+              git commit -am "Fork-Absicherung: neue Patch-URLs auf dieses Repo umschreiben"
+            fi
+            echo "guard_rc=${GUARD_RC}" >> "$GITHUB_OUTPUT"
+          else
+            git diff --name-only --diff-filter=U > /tmp/conflicts.txt
+            cat /tmp/conflicts.txt
+            git merge --abort
+            # Stand des Originals als Branch hochladen; die Konflikte zeigt
+            # GitHub im PR an und sie werden von Hand aufgeloest.
+            git checkout -q -B "${BRANCH}" "${UP_SHA}"
+            echo "conflicts=true" >> "$GITHUB_OUTPUT"
+            echo "guard_rc=" >> "$GITHUB_OUTPUT"
+          fi
+          git push --force origin "${BRANCH}"
+
+      - name: Pull-Request oeffnen
+        if: steps.merge.outcome == 'success'
+        env:
+          GH_TOKEN: ${{ secrets.SYNC_TOKEN }}
+        run: |
+          BRANCH="${{ steps.existing.outputs.branch }}"
+          UP_SHA="${{ steps.upstream.outputs.sha }}"
+          COUNT="${{ steps.upstream.outputs.count }}"
+          {
+            echo "Automatischer Abgleich mit [${UPSTREAM_REPO}](https://github.com/${UPSTREAM_REPO}) (Stand ${UP_SHA:0:7}, ${COUNT} neue Commits)."
+            echo
+            echo "**Neue Commits im Original**"
+            echo
+            git log --no-merges --format='- %s (%h)' "origin/${BASE_BRANCH}..${UP_SHA}" | head -n 60
+            echo
+            if [ "${{ steps.merge.outputs.conflicts }}" = "true" ]; then
+              echo "### ⚠️ Konflikte"
+              echo
+              echo "Der Abgleich laesst sich nicht automatisch mergen. Konflikte in:"
+              echo
+              sed 's/^/- `/; s/$/`/' /tmp/conflicts.txt
+              echo
+              echo "Beim Aufloesen die eigenen Anpassungen erhalten und danach pruefen:"
+              echo
+              echo '```'
+              echo 'python3 .github/scripts/fork_guard.py --fix'
+              echo '```'
+            elif [ "${{ steps.merge.outputs.guard_rc }}" = "0" ]; then
+              echo "### ✅ Ohne Konflikte gemergt"
+              echo
+              echo "Neue Patch-URLs wurden auf dieses Repo umgeschrieben, alle Absicherungen sind vorhanden."
+              echo
+              echo '```'
+              cat /tmp/guard.txt
+              echo '```'
+            else
+              echo "### ⚠️ Ohne Konflikte gemergt, aber Absicherungen verletzt"
+              echo
+              echo '```'
+              cat /tmp/guard.txt
+              echo '```'
+            fi
+            echo
+            echo "Bitte vor dem Mergen pruefen und einen Test-Build starten."
+          } > /tmp/pr-body.md
+          TITLE="Abgleich mit Original-rdgen (${UP_SHA:0:7})"
+          if [ "${{ steps.merge.outputs.conflicts }}" = "true" ]; then
+            TITLE="${TITLE} – Konflikte"
+          fi
+          gh pr create --repo "${GITHUB_REPOSITORY}" --base "${BASE_BRANCH}" --head "${BRANCH}" \
+            --title "${TITLE}" --body-file /tmp/pr-body.md
+
+  rustdesk-release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.BASE_BRANCH }}
+
+      - name: Neue RustDesk-Version pruefen
+        env:
+          GH_TOKEN: ${{ secrets.SYNC_TOKEN || github.token }}
+        run: |
+          LATEST=$(gh api repos/rustdesk/rustdesk/releases/latest --jq .tag_name)
+          LATEST="${LATEST#v}"
+          echo "Neueste RustDesk-Version: ${LATEST}"
+          if grep -q "'${LATEST}'" rdgenerator/api_views.py; then
+            echo "Wird bereits angeboten."
+            exit 0
+          fi
+          TITLE="RustDesk ${LATEST} wird noch nicht angeboten"
+          EXISTING=$(gh issue list --repo "${GITHUB_REPOSITORY}" --state all --search "\"${TITLE}\" in:title" --json number --jq 'length')
+          if [ "${EXISTING}" != "0" ]; then
+            echo "Issue existiert bereits."
+            exit 0
+          fi
+          if gh api "repos/${UPSTREAM_REPO}/contents/rdgenerator/api_views.py?ref=${UPSTREAM_BRANCH}" --jq .content | base64 -d | grep -q "'${LATEST}'"; then
+            STATE="Das Original-rdgen unterstützt ${LATEST} bereits. Der nächste Abgleich-PR bringt die Version mit; bitte prüfen und mergen."
+          else
+            STATE="Auch das Original-rdgen unterstützt ${LATEST} noch nicht. Die Build-Patches müssen dort erst angepasst werden; bis dahin ist nichts zu tun."
+          fi
+          gh issue create --repo "${GITHUB_REPOSITORY}" --title "${TITLE}" --body "RustDesk [${LATEST}](https://github.com/rustdesk/rustdesk/releases/tag/${LATEST}) ist erschienen, rdgen bietet die Version in diesem Fork noch nicht an.
+
+          ${STATE}"
