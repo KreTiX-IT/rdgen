@@ -284,10 +284,11 @@ jobs:
           max_attempts: 3
           retry_wait_seconds: 15
           shell: pwsh
-          continue_on_error: true
           command: |
-            Invoke-WebRequest -Uri https://raw.githubusercontent.com/${{ github.repository }}/${{ github.sha }}/.github/patches/allowCustom.diff -OutFile allowCustom.diff
-            git apply allowCustom.diff
+            Invoke-WebRequest -Uri https://raw.githubusercontent.com/${{ github.repository }}/${{ github.sha }}/.github/patches/allowCustom.py -OutFile allowCustom.py
+            python allowCustom.py
+            Invoke-WebRequest -Uri https://raw.githubusercontent.com/${{ github.repository }}/${{ github.sha }}/.github/patches/forcePresetPassword.py -OutFile forcePresetPassword.py
+            python forcePresetPassword.py
 
       - name: Install LLVM and Clang
         uses: KyleMayes/install-llvm-action@v1
@@ -405,10 +406,14 @@ jobs:
         if: ${{ env.delayFix == 'true' }}
         shell: bash
         run: |
-          # Precise fix: only extend the direct-connection condition with the
-          # key check, instead of globally replacing !key.is_empty() with
-          # false (which would also disable TCP encryption and UDP logic).
-          sed -i -e 's#if is_local || peer_nat_type == NatType::SYMMETRIC {#if is_local || peer_nat_type == NatType::SYMMETRIC || !key.is_empty() {#' ./src/client.rs
+          # Skip the optional secure_tcp handshake to the rendezvous server.
+          # The open-source rustdesk-server never sends KeyExchange, so when an
+          # access_token is set (third-party API login) the client waits for
+          # READ_TIMEOUT and fails with:
+          # "Failed to secure tcp: deadline has elapsed: Please try later(0)".
+          # Matches DVForge's delay fix. Safe on 1.4.x-1.5.x/master: the only
+          # !key.is_empty() occurrences in client.rs are the two secure_tcp gates.
+          sed -i -e 's|!key.is_empty()|false|' ./src/client.rs
           grep -n "key.is_empty()" ./src/client.rs || true
 
       - name: removeNewVersionNotif
@@ -417,7 +422,7 @@ jobs:
         shell: bash
         run: | 
           sed -i -e 's|{software_update_url ? <UpdateMe /> : ""}||' ./src/ui/index.tis
-          sed -i '/let (request, url) =/,/Ok(())/{/Ok(())/!d}' ./src/common.rs
+          #sed -i '/let (request, url) =/,/Ok(())/{/Ok(())/!d}' ./src/common.rs
 
       - name: Build rustdesk
         id: build
@@ -523,10 +528,11 @@ jobs:
           Remove-Item ./Release/unsigned_files.zip
           Remove-Item ./Release/signed_files.zip
 
-      - name: Create custom.txt file
+      - name: Create custom_.txt file
         shell: bash
         run: |
-          echo -n "${{ env.custom }}" | cat > ./Release/custom.txt
+          # allowCustom.py renames the runtime path to custom_.txt.
+          echo -n "${{ env.custom }}" | cat > ./Release/custom_.txt
 
       - name: Build self-extracted executable
         shell: bash
