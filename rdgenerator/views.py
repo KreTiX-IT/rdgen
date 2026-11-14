@@ -15,6 +15,7 @@ from django.conf import settings as _settings
 from django.db.models import Q
 from .forms import GenerateForm, HEX_COLOR_RE
 from .models import GithubRun
+from .version_check import get_version_notice
 from PIL import Image
 from urllib.parse import quote
 
@@ -519,7 +520,7 @@ def generator_view(request):
     else:
         form = GenerateForm()
     #return render(request, 'maintenance.html')
-    return render(request, 'generator.html', {'form': form})
+    return render(request, 'generator.html', {'form': form, 'version_notice': get_version_notice()})
 
 
 def _expected_files_for_platform(filename, platform):

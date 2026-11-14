@@ -365,6 +365,28 @@
             margin-left: 10px;
         }
 
+        .version-notice {
+            max-width: 1160px;
+            margin: 0 auto 10px auto;
+            padding: 12px 20px;
+            border-radius: 8px;
+            border-left: 4px solid #888;
+            background-color: #1e1e1e;
+            color: #e0e0e0;
+            font-size: 0.95em;
+            line-height: 1.5;
+        }
+        .version-notice--action {
+            border-left-color: #f0ad4e;
+            background-color: #2b2412;
+        }
+        .version-notice i {
+            margin-right: 8px;
+        }
+        .version-notice a {
+            color: #0095EA;
+        }
+
         .password-requirement {
             display: none; /* Hidden by default */
             color: orange;
@@ -419,6 +441,25 @@
 </head>
 <body>
     <h1><i class="fas fa-cogs"></i> RustDesk Custom Client Builder</h1>
+    {% if version_notice %}
+        {% if version_notice.upstream_supported %}
+        <div class="version-notice version-notice--action" role="status">
+            <i class="fas fa-exclamation-triangle"></i>
+            <strong>RustDesk {{ version_notice.latest }} ist verfügbar</strong> und wird vom
+            <a href="{{ version_notice.upstream_url }}" target="_blank" rel="noopener">Original-rdgen</a>
+            bereits unterstützt. Dieser Generator ist noch nicht aktualisiert –
+            bitte den offenen Abgleich-Pull-Request prüfen und mergen.
+            (<a href="{{ version_notice.release_url }}" target="_blank" rel="noopener">Release-Notes</a>)
+        </div>
+        {% else %}
+        <div class="version-notice" role="status">
+            <i class="fas fa-info-circle"></i>
+            <strong>RustDesk {{ version_notice.latest }} ist erschienen</strong>, wird von rdgen aber noch nicht
+            unterstützt. Die Build-Anpassungen müssen erst im Original-rdgen nachgezogen werden; bis dahin ist nichts zu tun.
+            (<a href="{{ version_notice.release_url }}" target="_blank" rel="noopener">Release-Notes</a>)
+        </div>
+        {% endif %}
+    {% endif %}
     <form id="myForm" action="/generator" method="post" enctype="multipart/form-data">
         <div class="save-load-section-container">
             <div class="section">
