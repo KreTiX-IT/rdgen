@@ -743,18 +743,6 @@ jobs:
         env:
           APP_VERSION: ${{ inputs.app_version }}
         run: |
-          # Originalschreibweise des App-Namens fuer die MSI verwenden (Verknuepfungen, Startmenue, Apps & Features),
-          # sofern er sich vom bereinigten Namen nur in Gross-/Kleinschreibung unterscheidet. Windows behandelt
-          # Dienstnamen, Pfade und Registry-Schluessel ohne Beachtung der Schreibweise, daher bleibt das kompatibel.
-          # Bei Leerzeichen, Umlauten oder Sonderzeichen wird weiterhin der bereinigte Name verwendet.
-          $appName = "${{ env.appname }}"
-          $slugAppName = "${{ env.slug_appname }}"
-          if ($appName -and ($appName.ToLowerInvariant() -ceq $slugAppName.ToLowerInvariant())) {
-            $msiAppName = $appName
-          } else {
-            $msiAppName = $slugAppName
-          }
-          Write-Host "MSI app name: $msiAppName"
           # MSI ProductVersion must be numeric, so strip build metadata such as
           # "+078" here. The client/updater keeps the full version; the MSI uses
           # the numeric base and preprocess.py adds its own revision.
@@ -764,9 +752,9 @@ jobs:
           }
           pushd ./res/msi
           if ($msiVersion) {
-            python preprocess.py --app-name "$msiAppName" --arp -d ../../rustdesk --version "$msiVersion"
+            python preprocess.py --app-name "${{ env.appname }}" --arp -d ../../rustdesk --version "$msiVersion"
           } else {
-            python preprocess.py --app-name "$msiAppName" --arp -d ../../rustdesk
+            python preprocess.py --app-name "${{ env.appname }}" --arp -d ../../rustdesk
           }
           nuget restore msi.sln
           msbuild msi.sln -p:Configuration=Release -p:Platform=x64 /p:TargetVersion=Windows10
